@@ -108,3 +108,4 @@ app.post('/whatsapp/sessions/:empresa_id/messages', async (req, res) => {
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`WhatsApp backend running on port ${port}`));
+// force redeploy
