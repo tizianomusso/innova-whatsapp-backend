@@ -30,24 +30,22 @@ app.post('/whatsapp/sessions', async (req, res) => {
 
     sessions[empresa_id] = { client: null, lastQr: null };
 
- const session = await create({
+const session = await create({
   session: empresa_id,
   catchQR: (qr) => {
     console.log(`QR generado para empresa ${empresa_id}`);
     sessions[empresa_id].lastQr = qr;
   },
   headless: true,
-  useChrome: false,
+  useChrome: true,              
   browserArgs: [
     '--no-sandbox',
     '--disable-setuid-sandbox',
     '--disable-dev-shm-usage',
     '--disable-gpu'
-  ],
-  puppeteerOptions: {
-    executablePath: '/usr/bin/chromium'
-  }
-}); 
+  ]
+
+});
     sessions[empresa_id].client = session;
 
 sessions[empresa_id].client = session;
