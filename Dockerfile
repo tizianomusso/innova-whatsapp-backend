@@ -18,7 +18,7 @@ ENV PORT=8080
 
 # Chrome path
 ENV PUPPETEER_SKIP_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
 EXPOSE 8080
 
 # Comando de inicio
