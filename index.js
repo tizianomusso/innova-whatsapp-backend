@@ -30,14 +30,25 @@ app.post('/whatsapp/sessions', async (req, res) => {
 
     sessions[empresa_id] = { client: null, lastQr: null };
 
-    const session = await create({
-      session: empresa_id,
-      catchQR: (qr) => {
-        console.log(`QR generado para empresa ${empresa_id}`);
-        sessions[empresa_id].lastQr = qr;
-      },
-      headless: true
-    });
+  const session = await create({
+  session: empresa_id,
+  catchQR: (qr) => {
+    console.log(`QR generado para empresa ${empresa_id}`);
+    sessions[empresa_id].lastQr = qr;
+  },
+  headless: true,
+  useChrome: false, // fuerza usar Chromium del contenedor
+  browserArgs: [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu'
+  ],
+  puppeteerOptions: {
+    executablePath: '/usr/bin/chromium-browser' // ruta del chromium dentro del Docker
+    // si sigue quejándose, probá '/usr/bin/chromium'
+  }
+});
 
     sessions[empresa_id].client = session;
 
