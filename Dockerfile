@@ -9,6 +9,7 @@ COPY package*.json ./
 
 # Instalamos dependencias en modo producción
 RUN npm install --omit=dev
+
 # Copiamos el resto del código
 COPY . .
 
@@ -16,9 +17,10 @@ COPY . .
 ENV NODE_ENV=production
 ENV PORT=8080
 
-# Chrome path
+# Opcional: evitamos que puppeteer descargue otro Chrome
 ENV PUPPETEER_SKIP_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+# Puerto expuesto
 EXPOSE 8080
 
 # Comando de inicio
