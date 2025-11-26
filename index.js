@@ -45,10 +45,8 @@ app.post('/whatsapp/sessions', async (req, res) => {
     '--disable-gpu'
   ],
   puppeteerOptions: {
-    executablePath: '/usr/bin/chromium-browser' // ruta del chromium dentro del Docker
-    // si sigue quejándose, probá '/usr/bin/chromium'
-  }
-});
+  executablePath: '/usr/bin/chromium'
+}
 
     sessions[empresa_id].client = session;
 
