@@ -30,25 +30,24 @@ app.post('/whatsapp/sessions', async (req, res) => {
 
     sessions[empresa_id] = { client: null, lastQr: null };
 
-const session = await create({
-  session: empresa_id,
-  catchQR: (qr) => {
-    console.log(`QR generado para empresa ${empresa_id}`);
-    sessions[empresa_id].lastQr = qr;
-  },
-  headless: true,
-  useChrome: true,              
-  browserArgs: [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-gpu'
-  ]
+    const session = await create({
+      session: empresa_id,
+      catchQR: (qr) => {
+        console.log(`QR generado para empresa ${empresa_id}`);
+        sessions[empresa_id].lastQr = qr;
+      },
+      headless: true,
+      useChrome: true,
+      browserArgs: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu'
+      ]
+    });
 
-});
     sessions[empresa_id].client = session;
 
-sessions[empresa_id].client = session;
     return res.json({
       status: 'session_created',
       empresa_id,
@@ -61,7 +60,7 @@ sessions[empresa_id].client = session;
   }
 });
 
-// Obtener QR actual
+// Obtener QR actual (JSON)
 app.get('/whatsapp/sessions/:empresa_id/qr', (req, res) => {
   const { empresa_id } = req.params;
 
@@ -70,6 +69,25 @@ app.get('/whatsapp/sessions/:empresa_id/qr', (req, res) => {
   }
 
   return res.json({ qr: sessions[empresa_id].lastQr });
+});
+
+// 🔴 NUEVO: Ver el QR como imagen PNG
+app.get('/whatsapp/qr/:empresa_id', (req, res) => {
+  const { empresa_id } = req.params;
+  const session = sessions[empresa_id];
+
+  if (!session || !session.lastQr) {
+    return res
+      .status(404)
+      .send('QR no encontrado para esta empresa. Generá primero la sesión.');
+  }
+
+  const dataUrl = session.lastQr; // "data:image/png;base64,AAAA..."
+  const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
+  const imgBuffer = Buffer.from(base64Data, 'base64');
+
+  res.setHeader('Content-Type', 'image/png');
+  res.send(imgBuffer);
 });
 
 // Obtener chats
