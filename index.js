@@ -17,33 +17,50 @@ app.post('/whatsapp/sessions', async (req, res) => {
   }
 
   // Si ya existe la sesión
-  if (sessions[empresa_id]) {
+  if (sessions[empresa_id] && sessions[empresa_id].client) {
     return res.json({
       status: 'session_exists',
       empresa_id,
-      qr: sessions[empresa_id].lastQr || null
+      qr: sessions[empresa_id].lastQr || null,
     });
   }
 
   try {
     console.log(`Creando nueva sesión para empresa ${empresa_id}...`);
 
-    sessions[empresa_id] = { client: null, lastQr: null };
+    // Creamos el objeto base para esta empresa
+    if (!sessions[empresa_id]) {
+      sessions[empresa_id] = { client: null, lastQr: null };
+    }
 
     const session = await create({
       session: empresa_id,
-      catchQR: (qr) => {
+      /**
+       * qrCode: string en base64 (data:image/png;base64,...)
+       * asciiQR: QR en ascii
+       * attempts: cantidad de intentos
+       * urlCode: link deeplink de WhatsApp
+       */
+      catchQR: (qrCode, asciiQR, attempts, urlCode) => {
         console.log(`QR generado para empresa ${empresa_id}`);
-        sessions[empresa_id].lastQr = qr;
+        console.log('urlCode:', urlCode);
+        sessions[empresa_id].lastQr = qrCode; // guardamos el base64
       },
+
+      // 💡 Clave: que NO se auto cierre si no se escanea rápido
+      autoClose: 0, // 0 = nunca se cierra automáticamente
+      // Opcional: por si tu versión soporta esta opción
+      // waitQrCode: 0,
+
       headless: true,
       useChrome: true,
       browserArgs: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
-        '--disable-gpu'
-      ]
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+      ],
     });
 
     sessions[empresa_id].client = session;
@@ -51,16 +68,27 @@ app.post('/whatsapp/sessions', async (req, res) => {
     return res.json({
       status: 'session_created',
       empresa_id,
-      qr: sessions[empresa_id].lastQr
+      qr: sessions[empresa_id].lastQr,
     });
 
   } catch (error) {
     console.error('Error creating session:', error);
+
+    // 👇 Si igual llegamos a tener un QR, lo devolvemos igual
+    if (sessions[empresa_id] && sessions[empresa_id].lastQr) {
+      return res.status(200).json({
+        status: 'qr_pending',
+        empresa_id,
+        qr: sessions[empresa_id].lastQr,
+        warning: 'Hubo un error (Auto Close / Failed to authenticate), pero el QR fue generado.',
+      });
+    }
+
     return res.status(500).json({ error: 'Error creating session' });
   }
 });
 
-// Obtener QR actual (JSON)
+// Obtener QR actual
 app.get('/whatsapp/sessions/:empresa_id/qr', (req, res) => {
   const { empresa_id } = req.params;
 
@@ -69,25 +97,6 @@ app.get('/whatsapp/sessions/:empresa_id/qr', (req, res) => {
   }
 
   return res.json({ qr: sessions[empresa_id].lastQr });
-});
-
-// 🔴 NUEVO: Ver el QR como imagen PNG
-app.get('/whatsapp/qr/:empresa_id', (req, res) => {
-  const { empresa_id } = req.params;
-  const session = sessions[empresa_id];
-
-  if (!session || !session.lastQr) {
-    return res
-      .status(404)
-      .send('QR no encontrado para esta empresa. Generá primero la sesión.');
-  }
-
-  const dataUrl = session.lastQr; // "data:image/png;base64,AAAA..."
-  const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
-  const imgBuffer = Buffer.from(base64Data, 'base64');
-
-  res.setHeader('Content-Type', 'image/png');
-  res.send(imgBuffer);
 });
 
 // Obtener chats
@@ -132,6 +141,6 @@ app.post('/whatsapp/sessions/:empresa_id/messages', async (req, res) => {
   res.json({ status: 'sent' });
 });
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 8080; // en Railway usamos 8080 por Dockerfile
 app.listen(port, () => console.log(`WhatsApp backend running on port ${port}`));
 // force redeploy
