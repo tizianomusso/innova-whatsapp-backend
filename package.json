@@ -1,14 +1,19 @@
 {
   "name": "innova-whatsapp-backend",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@wppconnect-team/wppconnect": "^1.23.1",
+    "@whiskeysockets/baileys": "^6.7.9",
     "cors": "^2.8.5",
-    "express": "^4.18.2"
+    "express": "^4.21.0",
+    "pino": "^9.4.0",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
