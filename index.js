@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const QRCode = require('qrcode');
 const fs = require('fs');
@@ -10,396 +10,211 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Logger silencioso para Baileys
-const logger = pino({ level: 'silent' });
-
-// Almacén de sesiones
+const logger = pino({ level: 'info' });
 const sessions = {};
-
-// Directorio de sesiones
 const SESSIONS_DIR = './sessions';
+
 if (!fs.existsSync(SESSIONS_DIR)) {
   fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }
 
-// ============================================
-// FUNCIÓN PRINCIPAL: Crear sesión de WhatsApp
-// ============================================
-async function createSession(empresa_id) {
+async function createSession(empresa_id, retryCount = 0) {
   const sessionPath = path.join(SESSIONS_DIR, empresa_id);
+  const MAX_RETRIES = 3;
   
-  // Inicializar objeto de sesión si no existe
   if (!sessions[empresa_id]) {
     sessions[empresa_id] = {
       client: null,
       lastQr: null,
-      lastQrRaw: null,
       status: 'initializing',
       user: null,
       qrRetries: 0
     };
   }
   
+  if (retryCount >= MAX_RETRIES) {
+    console.log(`[${empresa_id}] ❌ Máximo de reintentos alcanzado`);
+    sessions[empresa_id].status = 'failed';
+    return null;
+  }
+  
   try {
-    // Cargar estado de autenticación
+    console.log(`[${empresa_id}] Iniciando sesión (intento ${retryCount + 1})...`);
+    
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     
-    // Obtener versión de WhatsApp Web
-    const { version } = await fetchLatestBaileysVersion();
+    let version;
+    try {
+      const versionInfo = await fetchLatestBaileysVersion();
+      version = versionInfo.version;
+    } catch (e) {
+      version = [2, 2413, 1];
+    }
     console.log(`[${empresa_id}] Usando WA Web v${version.join('.')}`);
     
-    // Crear conexión
     const sock = makeWASocket({
       version,
-      auth: state,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
+      },
       logger,
       printQRInTerminal: true,
-      browser: ['Innova CRM', 'Chrome', '120.0.0'],
-      connectTimeoutMs: 60000,
+      browser: ['Innova CRM', 'Chrome', '122.0.0'],
+      connectTimeoutMs: 120000,
       qrTimeout: 60000,
-      defaultQueryTimeoutMs: 60000,
+      markOnlineOnConnect: false,
     });
     
     sessions[empresa_id].client = sock;
-    
-    // Guardar credenciales cuando se actualicen
     sock.ev.on('creds.update', saveCreds);
     
-    // ====== EVENTO PRINCIPAL: CONEXIÓN ======
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect, qr } = update;
       
-      // Si hay un QR, guardarlo
+      console.log(`[${empresa_id}] Estado: ${connection || 'update'}, QR: ${qr ? 'SI' : 'NO'}`);
+      
       if (qr) {
         sessions[empresa_id].qrRetries++;
         sessions[empresa_id].status = 'qr_ready';
-        sessions[empresa_id].lastQrRaw = qr;
-        
-        // Convertir a base64 para el frontend
         try {
-          const qrBase64 = await QRCode.toDataURL(qr, {
-            width: 400,
-            margin: 2,
-            color: { dark: '#000000', light: '#ffffff' }
-          });
-          sessions[empresa_id].lastQr = qrBase64;
-          console.log(`[${empresa_id}] ✅ QR generado (intento ${sessions[empresa_id].qrRetries})`);
+          sessions[empresa_id].lastQr = await QRCode.toDataURL(qr, { width: 400, margin: 2 });
+          console.log(`[${empresa_id}] ✅ QR GENERADO`);
         } catch (err) {
-          console.error(`[${empresa_id}] Error generando QR:`, err);
+          console.error(`[${empresa_id}] Error QR:`, err);
         }
       }
       
-      // Conexión abierta (autenticado!)
       if (connection === 'open') {
         sessions[empresa_id].status = 'connected';
         sessions[empresa_id].lastQr = null;
-        sessions[empresa_id].lastQrRaw = null;
-        sessions[empresa_id].qrRetries = 0;
         sessions[empresa_id].user = {
           id: sock.user?.id,
-          name: sock.user?.name || sock.user?.verifiedName || 'Usuario',
-          phone: sock.user?.id?.split(':')[0] || sock.user?.id?.split('@')[0]
+          name: sock.user?.name || 'Usuario',
+          phone: sock.user?.id?.split(':')[0]
         };
-        console.log(`[${empresa_id}] ✅ CONECTADO como ${sessions[empresa_id].user.name} (${sessions[empresa_id].user.phone})`);
+        console.log(`[${empresa_id}] ✅ CONECTADO`);
       }
       
-      // Conexión cerrada
       if (connection === 'close') {
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        console.log(`[${empresa_id}] Cerrado. Código: ${statusCode}`);
         
-        console.log(`[${empresa_id}] Conexión cerrada. Código: ${statusCode}. Reconectar: ${shouldReconnect}`);
-        
-        if (shouldReconnect) {
-          sessions[empresa_id].status = 'reconnecting';
-          setTimeout(() => createSession(empresa_id), 3000);
-        } else {
+        if (statusCode === DisconnectReason.loggedOut) {
           sessions[empresa_id].status = 'disconnected';
-          sessions[empresa_id].client = null;
-          sessions[empresa_id].lastQr = null;
-          sessions[empresa_id].user = null;
-          
           if (fs.existsSync(sessionPath)) {
             fs.rmSync(sessionPath, { recursive: true, force: true });
-            console.log(`[${empresa_id}] Sesión eliminada`);
           }
+        } else if (!sessions[empresa_id].lastQr && retryCount < MAX_RETRIES) {
+          sessions[empresa_id].status = 'reconnecting';
+          setTimeout(() => createSession(empresa_id, retryCount + 1), 5000);
+        } else if (sessions[empresa_id].lastQr) {
+          sessions[empresa_id].status = 'qr_ready';
+        } else {
+          sessions[empresa_id].status = 'failed';
         }
-      }
-    });
-    
-    // ====== MENSAJES ENTRANTES ======
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify') return;
-      
-      for (const msg of messages) {
-        if (msg.key.fromMe) continue;
-        if (msg.key.remoteJid === 'status@broadcast') continue;
-        
-        const messageBody = 
-          msg.message?.conversation ||
-          msg.message?.extendedTextMessage?.text ||
-          msg.message?.imageMessage?.caption ||
-          msg.message?.videoMessage?.caption ||
-          '[Media]';
-        
-        console.log(`[${empresa_id}] 📩 Mensaje de ${msg.pushName || msg.key.remoteJid}: ${messageBody.substring(0, 50)}...`);
       }
     });
     
     return sock;
-    
   } catch (error) {
-    console.error(`[${empresa_id}] Error creando sesión:`, error);
+    console.error(`[${empresa_id}] Error:`, error.message);
     sessions[empresa_id].status = 'error';
-    sessions[empresa_id].error = error.message;
-    throw error;
+    return null;
   }
 }
 
-// ============================================
-// ENDPOINTS REST API
-// ============================================
-
-// Health check
 app.get('/', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'Innova WhatsApp Backend',
-    version: '2.0.0',
-    sessions: Object.keys(sessions).length,
-    timestamp: new Date().toISOString()
-  });
+  res.json({ status: 'ok', service: 'Innova WhatsApp Backend', version: '2.1.0' });
 });
 
-// Crear/iniciar sesión
 app.post('/whatsapp/sessions', async (req, res) => {
   const { empresa_id } = req.body;
-  
-  if (!empresa_id) {
-    return res.status(400).json({ error: 'empresa_id es requerido' });
-  }
+  if (!empresa_id) return res.status(400).json({ error: 'empresa_id requerido' });
   
   if (sessions[empresa_id]?.status === 'connected') {
-    return res.json({
-      status: 'already_connected',
-      empresa_id,
-      user: sessions[empresa_id].user
-    });
+    return res.json({ status: 'already_connected', empresa_id, user: sessions[empresa_id].user });
   }
   
-  if (sessions[empresa_id]?.lastQr && sessions[empresa_id]?.status === 'qr_ready') {
-    return res.json({
-      status: 'qr_ready',
-      empresa_id,
-      qr: sessions[empresa_id].lastQr
-    });
+  if (sessions[empresa_id]?.lastQr) {
+    return res.json({ status: 'qr_ready', empresa_id, qr: sessions[empresa_id].lastQr });
   }
   
-  try {
-    console.log(`[${empresa_id}] Iniciando nueva sesión...`);
-    await createSession(empresa_id);
-    
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    return res.json({
-      status: sessions[empresa_id].status,
-      empresa_id,
-      qr: sessions[empresa_id].lastQr,
-      user: sessions[empresa_id].user
-    });
-    
-  } catch (error) {
-    console.error(`[${empresa_id}] Error:`, error);
-    
+  // Limpiar sesión fallida anterior
+  if (sessions[empresa_id]) {
+    const sessionPath = path.join(SESSIONS_DIR, empresa_id);
+    if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
+    delete sessions[empresa_id];
+  }
+  
+  createSession(empresa_id, 0);
+  
+  // Esperar hasta 15 segundos por el QR
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 500));
     if (sessions[empresa_id]?.lastQr) {
-      return res.json({
-        status: 'qr_ready',
-        empresa_id,
-        qr: sessions[empresa_id].lastQr,
-        warning: error.message
-      });
+      return res.json({ status: 'qr_ready', empresa_id, qr: sessions[empresa_id].lastQr });
     }
-    
-    return res.status(500).json({ 
-      error: 'Error creando sesión',
-      details: error.message 
-    });
+    if (sessions[empresa_id]?.status === 'connected') {
+      return res.json({ status: 'connected', empresa_id, user: sessions[empresa_id].user });
+    }
+    if (sessions[empresa_id]?.status === 'failed') {
+      return res.status(500).json({ status: 'failed', empresa_id });
+    }
   }
+  
+  return res.json({ status: sessions[empresa_id]?.status || 'initializing', empresa_id, qr: null });
 });
 
-// Obtener estado de sesión
 app.get('/whatsapp/sessions/:empresa_id/status', (req, res) => {
   const { empresa_id } = req.params;
-  
-  if (!sessions[empresa_id]) {
-    return res.json({
-      status: 'not_found',
-      empresa_id,
-      exists: false
-    });
-  }
-  
+  if (!sessions[empresa_id]) return res.json({ status: 'not_found', exists: false });
   return res.json({
     status: sessions[empresa_id].status,
-    empresa_id,
-    exists: true,
     connected: sessions[empresa_id].status === 'connected',
-    user: sessions[empresa_id].user,
-    hasQr: !!sessions[empresa_id].lastQr
+    hasQr: !!sessions[empresa_id].lastQr,
+    user: sessions[empresa_id].user
   });
 });
 
-// Obtener QR (JSON con base64)
 app.get('/whatsapp/sessions/:empresa_id/qr', (req, res) => {
   const { empresa_id } = req.params;
-  
-  if (!sessions[empresa_id]) {
-    return res.status(404).json({ error: 'Sesión no encontrada' });
-  }
-  
-  if (sessions[empresa_id].status === 'connected') {
-    return res.json({ 
-      status: 'already_connected',
-      user: sessions[empresa_id].user,
-      qr: null 
-    });
-  }
-  
-  if (!sessions[empresa_id].lastQr) {
-    return res.json({ 
-      status: sessions[empresa_id].status,
-      qr: null,
-      message: 'QR aún no disponible, intentá de nuevo en unos segundos'
-    });
-  }
-  
-  return res.json({ 
-    status: 'qr_ready',
-    qr: sessions[empresa_id].lastQr 
-  });
+  if (!sessions[empresa_id]) return res.status(404).json({ error: 'Sesión no encontrada' });
+  return res.json({ status: sessions[empresa_id].status, qr: sessions[empresa_id].lastQr });
 });
 
-// Obtener QR como imagen PNG
 app.get('/whatsapp/qr/:empresa_id', (req, res) => {
   const { empresa_id } = req.params;
-  
-  if (!sessions[empresa_id]?.lastQr) {
-    return res.status(404).send('QR no disponible. Creá primero la sesión.');
-  }
-  
+  if (!sessions[empresa_id]?.lastQr) return res.status(404).send('QR no disponible');
   const base64Data = sessions[empresa_id].lastQr.replace(/^data:image\/png;base64,/, '');
-  const imgBuffer = Buffer.from(base64Data, 'base64');
-  
   res.setHeader('Content-Type', 'image/png');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.send(imgBuffer);
+  res.send(Buffer.from(base64Data, 'base64'));
 });
 
-// Obtener chats
-app.get('/whatsapp/sessions/:empresa_id/chats', async (req, res) => {
-  const { empresa_id } = req.params;
-  
-  if (!sessions[empresa_id]?.client) {
-    return res.status(404).json({ error: 'Sesión no encontrada' });
-  }
-  
-  if (sessions[empresa_id].status !== 'connected') {
-    return res.status(400).json({ error: 'Sesión no conectada' });
-  }
-  
-  try {
-    return res.json({ 
-      message: 'Para obtener chats, usá el endpoint de mensajes o implementá almacenamiento',
-      status: sessions[empresa_id].status
-    });
-  } catch (error) {
-    return res.status(500).json({ error: error.message });
-  }
-});
-
-// Enviar mensaje
 app.post('/whatsapp/sessions/:empresa_id/messages', async (req, res) => {
   const { empresa_id } = req.params;
   const { to, message } = req.body;
-  
-  if (!to || !message) {
-    return res.status(400).json({ error: 'Se requiere "to" y "message"' });
+  if (!sessions[empresa_id]?.client || sessions[empresa_id].status !== 'connected') {
+    return res.status(400).json({ error: 'No conectado' });
   }
-  
-  if (!sessions[empresa_id]?.client) {
-    return res.status(404).json({ error: 'Sesión no encontrada' });
-  }
-  
-  if (sessions[empresa_id].status !== 'connected') {
-    return res.status(400).json({ error: 'Sesión no conectada' });
-  }
-  
   try {
     const jid = to.includes('@') ? to : `${to.replace(/\D/g, '')}@s.whatsapp.net`;
-    
     const result = await sessions[empresa_id].client.sendMessage(jid, { text: message });
-    
-    console.log(`[${empresa_id}] 📤 Mensaje enviado a ${to}`);
-    
-    return res.json({ 
-      status: 'sent',
-      messageId: result.key.id,
-      to: jid
-    });
+    return res.json({ status: 'sent', messageId: result.key.id });
   } catch (error) {
-    console.error(`[${empresa_id}] Error enviando mensaje:`, error);
     return res.status(500).json({ error: error.message });
   }
 });
 
-// Cerrar sesión (logout)
-app.post('/whatsapp/sessions/:empresa_id/logout', async (req, res) => {
+app.delete('/whatsapp/sessions/:empresa_id', (req, res) => {
   const { empresa_id } = req.params;
-  
-  if (!sessions[empresa_id]?.client) {
-    return res.status(404).json({ error: 'Sesión no encontrada' });
-  }
-  
-  try {
-    await sessions[empresa_id].client.logout();
-    console.log(`[${empresa_id}] Logout realizado`);
-  } catch (e) {
-    // Ignorar errores de logout
-  }
-  
   const sessionPath = path.join(SESSIONS_DIR, empresa_id);
-  if (fs.existsSync(sessionPath)) {
-    fs.rmSync(sessionPath, { recursive: true, force: true });
-  }
-  
+  if (fs.existsSync(sessionPath)) fs.rmSync(sessionPath, { recursive: true, force: true });
   delete sessions[empresa_id];
-  
-  return res.json({ status: 'logged_out', empresa_id });
+  return res.json({ status: 'deleted' });
 });
 
-// Listar todas las sesiones
-app.get('/whatsapp/sessions', (req, res) => {
-  const list = Object.entries(sessions).map(([id, session]) => ({
-    empresa_id: id,
-    status: session.status,
-    connected: session.status === 'connected',
-    user: session.user
-  }));
-  
-  return res.json({ sessions: list });
-});
-
-// ============================================
-// INICIAR SERVIDOR
-// ============================================
 const port = process.env.PORT || 3000;
-
 app.listen(port, () => {
-  console.log(`
-╔════════════════════════════════════════════════════╗
-║   🚀 Innova WhatsApp Backend v2.0                  ║
-║   📡 Servidor corriendo en puerto ${port}             ║
-║   🔗 Usando Baileys (sin Chrome/Puppeteer)         ║
-╚════════════════════════════════════════════════════╝
-  `);
+  console.log(`🚀 Innova WhatsApp Backend v2.1 - Puerto ${port}`);
 });
